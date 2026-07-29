@@ -1,0 +1,144 @@
+version: '3.8'
+
+services:
+  # ----------------------------------------------------------------------------
+  # 1. OpenEMR MySQL Database Server
+  # ----------------------------------------------------------------------------
+  openemr-db:
+    image: mariadb:10.11
+    container_name: openemr-db
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: ${OPENEMR_MYSQL_ROOT_PASSWORD:-OpenEMRSecurePass2026!}
+      MYSQL_USER: ${OPENEMR_MYSQL_USER:-openemr_user}
+      MYSQL_PASSWORD: ${OPENEMR_MYSQL_PASSWORD:-OpenEMRDbPass2026!}
+      MYSQL_DATABASE: ${OPENEMR_MYSQL_DATABASE:-openemr_db}
+    volumes:
+      - openemr_db_data:/var/lib/mysql
+    networks:
+      - health-private-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${OPENEMR_MYSQL_ROOT_PASSWORD:-OpenEMRSecurePass2026!}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ----------------------------------------------------------------------------
+  # 2. OpenEMR Core EMR (Apache / PHP)
+  # ----------------------------------------------------------------------------
+  openemr:
+    image: openemr/openemr:7.0.2
+    container_name: openemr
+    restart: always
+    ports:
+      - "${OPENEMR_PORT:-8300}:80"
+    environment:
+      MYSQL_HOST: openemr-db
+      MYSQL_USER: ${OPENEMR_MYSQL_USER:-openemr_user}
+      MYSQL_PASSWORD: ${OPENEMR_MYSQL_PASSWORD:-OpenEMRDbPass2026!}
+      MYSQL_DATABASE: ${OPENEMR_MYSQL_DATABASE:-openemr_db}
+      MYSQL_ROOT_PASSWORD: ${OPENEMR_MYSQL_ROOT_PASSWORD:-OpenEMRSecurePass2026!}
+    volumes:
+      - openemr_documents:/var/www/localhost/htdocs/openemr/sites/default/documents
+    depends_on:
+      openemr-db:
+        condition: service_healthy
+    networks:
+      - health-private-network
+
+  # ----------------------------------------------------------------------------
+  # 3. PostgreSQL Database (HIPAA / LGPD Audit Log & Local Cache)
+  # ----------------------------------------------------------------------------
+  postgres-aux:
+    image: postgres:15-alpine
+    container_name: postgres-aux
+    restart: always
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-healthtech_aux}
+      POSTGRES_USER: ${POSTGRES_USER:-health_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-AuxDbSecurePass2026!}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_aux_data:/var/lib/postgresql/data
+    networks:
+      - health-private-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-health_admin} -d ${POSTGRES_DB:-healthtech_aux}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ----------------------------------------------------------------------------
+  # 4. Redis Server (BullMQ, Token Store & Rate Limiter Cache)
+  # ----------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    restart: always
+    command: redis-server --requirepass ${REDIS_PASSWORD:-RedisSecurePass2026!}
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - health-private-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-RedisSecurePass2026!}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ----------------------------------------------------------------------------
+  # 5. Custom HealthTech API Middleware / Gateway (Node.js Express / NestJS)
+  # ----------------------------------------------------------------------------
+  middleware-gateway:
+    build:
+      context: ./middleware
+      dockerfile: Dockerfile
+    container_name: middleware-gateway
+    restart: always
+    ports:
+      - "${MIDDLEWARE_PORT:-3000}:3000"
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      PORT: 3000
+      JWT_SECRET: ${JWT_SECRET:-JWTAccessTokenSecretSecure2026!}
+      OPENEMR_FHIR_BASE_URL: http://openemr:80/apis/default/fhir
+      OPENEMR_CLIENT_ID: ${OPENEMR_CLIENT_ID}
+      OPENEMR_CLIENT_SECRET: ${OPENEMR_CLIENT_SECRET}
+      OPENEMR_TOKEN_URL: http://openemr:80/oauth2/default/token
+      POSTGRES_HOST: postgres-aux
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-healthtech_aux}
+      POSTGRES_USER: ${POSTGRES_USER:-health_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-AuxDbSecurePass2026!}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-RedisSecurePass2026!}
+      DB_ENCRYPTION_KEY: ${DB_ENCRYPTION_KEY}
+      AUDIT_LOG_SALT: ${AUDIT_LOG_SALT}
+    depends_on:
+      openemr:
+        condition: service_started
+      postgres-aux:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - health-private-network
+
+networks:
+  health-private-network:
+    name: health-private-network
+    driver: bridge
+
+volumes:
+  openemr_db_data:
+    driver: local
+  openemr_documents:
+    driver: local
+  postgres_aux_data:
+    driver: local
+  redis_data:
+    driver: local
